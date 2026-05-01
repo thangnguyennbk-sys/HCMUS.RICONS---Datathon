@@ -1,485 +1,99 @@
 \documentclass{article}
-
-% NeurIPS 2024 style
 \usepackage[preprint]{neurips_2024}
 
 \usepackage{fontspec}
 \usepackage{polyglossia}
 \setdefaultlanguage{vietnamese}
 \usepackage{hyperref}
-\usepackage{url}
 \usepackage{booktabs}
-\usepackage{amsfonts}
-\usepackage{nicefrac}
-\usepackage{microtype}
-\usepackage{xcolor}
 \usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{graphicx}
-\usepackage{multirow}
-\usepackage{array}
-\usepackage{tabularx}
 \usepackage{float}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
-\usepackage{listings}
-\usepackage{subcaption}
-\usepackage{tikz}
-\usetikzlibrary{shapes.geometric, arrows, positioning, fit, backgrounds}
+\usepackage{microtype}
+\usepackage{geometry}
+\geometry{top=0.85in, bottom=0.85in, left=1.25in, right=1.25in}
 
-\lstset{
-  basicstyle=\ttfamily\small,
-  keywordstyle=\color{blue},
-  commentstyle=\color{gray},
-  breaklines=true,
-  frame=single
-}
-
-\title{Phần 3: Mô hình Dự báo Doanh thu\\
-\large Phương pháp Tiếp cận, Pipeline Mô hình và Kết quả Thực nghiệm}
-
-\author{
-  Datathon 2026 -- Round 1 \\
-  \texttt{Kaggle Public Score MAE $\approx$ 697{,}864}
-}
+\title{Phần 3: Mô hình Dự báo Doanh thu (Sales Forecasting)}
+\author{Datathon 2026 -- Round 1\quad\texttt{Kaggle Public MAE $\approx$ \textbf{697,864}}}
 
 \begin{document}
-
 \maketitle
+\vspace{-1.5em}
 
-\begin{abstract}
-Báo cáo này trình bày hệ thống dự báo doanh thu (Revenue) và chi phí hàng bán (COGS) theo ngày cho giai đoạn 01/01/2023 -- 01/07/2024 (548 ngày) trong cuộc thi Datathon 2026 Round 1. Bài toán đặt ra ba thách thức chính: horizon dự báo dài, không có dữ liệu phụ trợ trong giai đoạn kiểm tra, và yêu cầu kiểm soát chặt chẽ data leakage. Pipeline đề xuất kết hợp (1) trích xuất đặc trưng mùa vụ từ 6 bộ dữ liệu phụ trợ, (2) feature engineering với 80 đặc trưng từ 7 nhóm, (3) cross-validation 10-fold theo chuỗi thời gian không bị rò rỉ, và (4) ensemble 5 mô hình với Ridge stacking. Hệ thống đạt \textbf{MAE $\approx$ 697{,}864} trên Kaggle Public Leaderboard, với CatBoost chiếm 92\% trọng số stacking.
-\end{abstract}
+\section*{1.\; Phương pháp Tiếp cận}
 
-% ─────────────────────────────────────────────────────────
-\section{Phương pháp Tiếp cận}
-% ─────────────────────────────────────────────────────────
+Bài toán dự báo Revenue và COGS cho 548 ngày (01/01/2023--01/07/2024). Ba thách thức chính:
+\textbf{(i)} \textit{Direct forecasting} thay vì recursive để tránh tích lũy sai số qua horizon dài.
+\textbf{(ii)} Auxiliary data chỉ có đến 2022 -- giải pháp: trích xuất \textit{seasonal averages} (monthly, DOW) lặp lại theo chu kỳ, ngoại suy sang test mà không gây leakage.
+\textbf{(iii)} Lag features chỉ tra cứu ngày $<$ 01/01/2023; \texttt{TimeSeriesSplit} đảm bảo validation sau training; \texttt{SEED=42}.
 
-\subsection{Phát biểu Bài toán}
+\section*{2.\; Pipeline Mô hình}
 
-Cho tập huấn luyện $\mathcal{D}_{\text{train}} = \{(t_i, r_i, c_i)\}_{i=1}^{3833}$ trong đó $t_i$ là ngày từ 04/07/2012 đến 31/12/2022, $r_i$ là Revenue và $c_i$ là COGS tương ứng. Mục tiêu là dự báo $\hat{r}_j$ và $\hat{c}_j$ cho $j = 1, \ldots, 548$ ngày trong giai đoạn 01/01/2023 -- 01/07/2024. Chỉ số đánh giá là:
-\begin{equation}
-  \text{MAE} = \frac{1}{548} \sum_{j=1}^{548} |\hat{r}_j - r_j|
-\end{equation}
-
-\subsection{Các Thách thức và Chiến lược Giải quyết}
-
-\paragraph{Horizon dài (548 ngày).}
-Phương pháp dự báo đệ quy (recursive forecasting) dễ tích lũy sai số theo horizon. Thay vào đó, chúng tôi áp dụng \textbf{direct forecasting}: mỗi bước dự báo $t+h$ được thực hiện trực tiếp từ đặc trưng lịch sử, không phụ thuộc dự báo trung gian.
-
-\paragraph{Không có dữ liệu phụ trợ trong giai đoạn kiểm tra.}
-Các bộ dữ liệu phụ trợ (đơn hàng, thanh toán, vận chuyển, v.v.) chỉ bao phủ giai đoạn 2012--2022. Để tận dụng tín hiệu kinh doanh cho giai đoạn 2023--2024, chúng tôi trích xuất \textbf{seasonal patterns} (trung bình theo tháng, theo ngày trong tuần) từ dữ liệu lịch sử. Các mẫu chu kỳ này lặp lại định kỳ và có thể ngoại suy sang giai đoạn kiểm tra mà không gây data leakage.
-
-\paragraph{Kiểm soát data leakage.}
-Ba ràng buộc nghiêm ngặt được đảm bảo: (i) Lag features chỉ tra cứu trong $\mathcal{D}_{\text{train}}$ (ngày $< $ 01/01/2023); (ii) Không sử dụng dữ liệu ngoài tám file CSV được cung cấp; (iii) Validation set trong TimeSeriesSplit luôn nằm \textit{sau} training set theo trục thời gian.
-
-% ─────────────────────────────────────────────────────────
-\section{Pipeline Mô hình}
-% ─────────────────────────────────────────────────────────
-
-\subsection{Tổng quan Pipeline}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[
-  node distance=0.45cm,
-  box/.style={rectangle, rounded corners, draw=black!70, fill=blue!10, text width=6.5cm, align=center, minimum height=0.75cm, font=\small},
-  arrow/.style={->, thick, color=black!60}
-]
-  \node[box] (data)   {8 bộ dữ liệu CSV (sales + 7 phụ trợ)};
-  \node[box, below=of data]  (seas)  {[1] Trích xuất Seasonal Features};
-  \node[box, below=of seas]  (feat)  {[2] Feature Engineering -- 80 đặc trưng};
-  \node[box, below=of feat]  (cv)    {[3] 10-fold TimeSeriesSplit CV};
-  \node[box, below=of cv]    (base)  {[4] 5 Base Models (LGB, XGB, HGB, CatBoost, Ridge)};
-  \node[box, below=of base]  (stack) {[5] Ridge Stacking (positive=True, $\alpha$=1.0)};
-  \node[box, below=of stack] (out)   {[6] \texttt{submission.csv} -- Revenue + COGS (548 ngày)};
-  \draw[arrow] (data) -- (seas);
-  \draw[arrow] (seas) -- (feat);
-  \draw[arrow] (feat) -- (cv);
-  \draw[arrow] (cv)   -- (base);
-  \draw[arrow] (base) -- (stack);
-  \draw[arrow] (stack)-- (out);
-\end{tikzpicture}
-\caption{Pipeline tổng quan của hệ thống dự báo doanh thu.}
-\label{fig:pipeline}
-\end{figure}
-
-\subsection{Dữ liệu và Tương quan}
-
-Bảng~\ref{tab:auxiliary} tóm tắt sáu bộ dữ liệu phụ trợ cùng hệ số tương quan Pearson với Revenue theo ngày.
+\vspace{0.3em}
+\noindent\textbf{2.1\; Feature Engineering -- 80 đặc trưng}
 
 \begin{table}[H]
-\centering
-\caption{Dữ liệu phụ trợ và tương quan với Revenue.}
-\label{tab:auxiliary}
-\small
-\begin{tabular}{lrrl}
+\vspace{-0.3em}
+\centering\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llr}
 \toprule
-\textbf{Bộ dữ liệu} & \textbf{Số bản ghi} & \textbf{Corr. (Pearson)} & \textbf{Seasonal features} \\
+\textbf{Nhóm} & \textbf{Mô tả} & \textbf{\#} \\
 \midrule
-\texttt{orders.csv}      & $\sim$800k  & 0.936 & Monthly avg, DOW avg, Quarterly avg, Month$\times$DOW \\
-\texttt{payments.csv}    & $\sim$600k  & 0.992 & Monthly avg, DOW avg \\
-\texttt{shipments.csv}   & $\sim$500k  & 0.815 & Monthly avg, DOW avg \\
-\texttt{returns.csv}     & $\sim$50k   & 0.441 & Monthly avg, Refund monthly avg \\
-\texttt{web\_traffic.csv}& $\sim$3.6k  & 0.321 & Monthly avg sessions/visitors, DOW avg \\
-\texttt{promotions.csv}  & $\sim$10    & ---   & Recurring promo windows \\
+Time           & year, month, day, dayofweek, quarter, time\_idx, \ldots & 12 \\
+Calendar \& Holiday & is\_holiday, is\_near\_holiday, is\_q1--q4, week position & 19 \\
+Cyclical       & sin/cos(month, DOW, dayofyear $\times$ 3 harmonics) & 10 \\
+Historical lag & rev\_1y/2y/3y, cogs\_1y/2y/3y, YoY growth, margin & 10 \\
+Auxiliary seasonal & Monthly/DOW avg từ orders (0.936), payments (0.992), shipments (0.815), returns, web & 19 \\
+Merge analysis & page\_views (0.959), bounce\_rate, installments, refund, items/order & 9 \\
+Promotion      & is\_promo (recurring promo windows) & 1 \\
 \bottomrule
 \end{tabular}
+\vspace{-0.3em}
 \end{table}
 
-\subsection{Feature Engineering -- 80 Đặc trưng}
+\noindent Số trong ngoặc là Pearson correlation với Revenue. Missing values: cascade fill (1y$\to$2y$\to$3y$\to$median train).
 
-Toàn bộ đặc trưng được phân thành 7 nhóm, mỗi nhóm khai thác một khía cạnh khác nhau của mẫu doanh thu.
-
-\subsubsection{Nhóm 1: Time Features (12 đặc trưng)}
-
-Các thành phần thời gian cơ bản: \texttt{year}, \texttt{month}, \texttt{day}, \texttt{dayofweek}, \texttt{dayofyear}, \texttt{weekofyear}, \texttt{quarter}, \texttt{is\_weekend}, \texttt{is\_month\_start}, \texttt{is\_month\_end}, \texttt{time\_idx} (xu hướng tuyến tính), \texttt{day\_of\_month\_pct}.
-
-\subsubsection{Nhóm 2: Calendar \& Holiday Features (19 đặc trưng)}
+\vspace{0.4em}
+\noindent\textbf{2.2\; 5 Base Models + Ridge Stacking (10-fold TimeSeriesSplit)}
 
 \begin{table}[H]
-\centering
-\caption{Các đặc trưng lịch và ngày lễ.}
-\label{tab:calendar}
-\small
-\begin{tabular}{llp{5.5cm}}
+\vspace{-0.3em}
+\centering\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lccl}
 \toprule
-\textbf{Nhóm con} & \textbf{Đặc trưng} & \textbf{Lý do} \\
+\textbf{Model} & \textbf{Iter.} & \textbf{Stack weight} & \textbf{Ghi chú} \\
 \midrule
-Ngày trong tuần  & is\_saturday/sunday/monday/friday & Revenue khác biệt rõ giữa các ngày \\
-Vị trí tháng     & week\_of\_month, is\_first/last\_week, is\_mid\_month, days\_to\_month\_end & Pattern lương, thanh toán đầu/cuối tháng \\
-Quý              & is\_q1/q2/q3/q4, is\_quarter\_start/end, month\_in\_quarter & Seasonal theo quý \\
-Năm              & is\_year\_start, is\_year\_end & Revenue đặc biệt đầu/cuối năm \\
-Ngày lễ          & is\_holiday, is\_near\_holiday ($\pm$3 ngày) & Tết, 30/4, 1/5, 2/9, Giáng sinh \\
+\textbf{CatBoost} & 1200 & $\sim$\textbf{0.92} & Ordered boosting, phù hợp TS nhỏ (3,833 mẫu) \\
+HGB (sklearn)     & 800  & $\sim$0.11          & Native missing value \\
+Ridge             & --   & $\sim$0.02          & Bắt xu hướng dài hạn \\
+LightGBM / XGBoost & 800 & $\sim$0.00          & Diversity gián tiếp (+5k MAE nếu bỏ) \\
 \bottomrule
 \end{tabular}
+\vspace{-0.3em}
 \end{table}
 
-\subsubsection{Nhóm 3: Cyclical Features (10 đặc trưng)}
+\noindent OOF predictions từ 10 folds làm meta-features cho Ridge meta-learner (\texttt{positive=True, alpha=1.0}). Target: $\tilde{y}=\log(1+r)$; inverse $\hat{r}=\max(e^{\tilde{y}}-1, 0)$. COGS blend: $\hat{c}=0.7\,\hat{c}_{\text{model}}+0.3\,(\hat{r}\cdot\rho)$, $\rho=\sum c_i/\sum r_i$.
 
-Mã hóa sin/cos cho \texttt{month} (chu kỳ 12), \texttt{dayofweek} (chu kỳ 7), và \texttt{dayofyear} với 3 harmonics (chu kỳ 365.25):
-\begin{equation}
-  f_k^{\sin}(t) = \sin\!\left(\frac{2\pi k \cdot \text{doy}(t)}{365.25}\right), \quad
-  f_k^{\cos}(t) = \cos\!\left(\frac{2\pi k \cdot \text{doy}(t)}{365.25}\right), \quad k \in \{1,2,3\}
-\end{equation}
-
-\subsubsection{Nhóm 4: Historical Lag Features (10 đặc trưng)}
+\section*{3.\; Kết quả Thực nghiệm}
 
 \begin{table}[H]
-\centering
-\caption{Đặc trưng lag lịch sử và cách xử lý missing.}
-\label{tab:lags}
-\small
-\begin{tabular}{llp{5cm}}
+\vspace{-0.3em}
+\centering\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lcc}
 \toprule
-\textbf{Đặc trưng} & \textbf{Công thức} & \textbf{Xử lý missing} \\
+\textbf{Thay đổi} & \textbf{$\Delta$ MAE} & \textbf{Ghi chú} \\
 \midrule
-\texttt{rev\_1y/2y/3y}  & Revenue cùng ngày ($\pm$1), 1/2/3 năm trước & Cascade: 1y$\to$2y$\to$3y$\to$median \\
-\texttt{cogs\_1y/2y/3y} & COGS tương tự & Cascade fill \\
-\texttt{rev\_yoy\_growth}& $(r_{1y} - r_{2y})/(r_{2y}+1)$ & --- \\
-\texttt{margin\_1y}     & $(r_{1y}-c_{1y})/(r_{1y}+1)$ & --- \\
-\texttt{rev\_avg\_hist} & $\text{mean}(r_{1y}, r_{2y}, r_{3y})$ & --- \\
-\texttt{rev\_1y\_vs\_month}& $r_{1y}/(\bar{r}_m + 1)$ & --- \\
+\textbf{Full pipeline -- Kaggle public score} & \textbf{697,864} & Kết quả cuối \\
+CatBoost 800 $\to$ 1200 iterations & $-2.1$k & Tương xứng weight 92\% \\
+Calendar \& holiday features & $-7$k & Pattern Tết, ngày lễ, quý rõ rệt \\
+Loại LGB/XGB khỏi ensemble & $+5$k & Diversity có giá trị gián tiếp \\
 \bottomrule
 \end{tabular}
+\vspace{-0.3em}
 \end{table}
 
-\textbf{Leakage check:} Tất cả lag dates đều thuộc train period ($< $ 01/01/2023), đảm bảo không rò rỉ thông tin từ tập test.
-
-\subsubsection{Nhóm 5: Auxiliary Seasonal Features (19 đặc trưng)}
-
-Trung bình theo tháng (monthly avg) và theo ngày trong tuần (DOW avg) từ 6 bộ dữ liệu phụ trợ, cộng thêm seasonal pattern của Revenue/COGS chính (monthly avg, DOW avg, month$\times$DOW interaction, std, median).
-
-\subsubsection{Nhóm 6: Merge Analysis Features (9 đặc trưng)}
-
-Nhóm đặc trưng mới được phát hiện qua phân tích tương quan giữa các trường chi tiết trong dữ liệu phụ trợ và Revenue:
-
-\begin{table}[H]
-\centering
-\caption{Đặc trưng từ merge analysis.}
-\label{tab:merge}
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Đặc trưng} & \textbf{Corr. với Revenue} & \textbf{Mô tả} \\
-\midrule
-\texttt{pv\_month/pv\_dow}            & 0.959 & Page views trung bình \\
-\texttt{bounce\_month/bounce\_dow}    & 0.530 & Bounce rate trung bình \\
-\texttt{duration\_month}              & $-$0.517 & Thời gian session \\
-\texttt{inst\_month}                  & 0.540 & Số kỳ trả góp \\
-\texttt{avg\_refund\_month}           & 0.536 & Refund trung bình/return \\
-\texttt{items\_per\_order\_month}     & seasonal & Số items/đơn hàng \\
-\texttt{pay\_per\_order\_month}       & seasonal & Thanh toán/đơn hàng \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsubsection{Nhóm 7: Promotion Feature (1 đặc trưng)}
-
-\texttt{is\_promo}: Nhận giá trị 1 nếu ngày nằm trong cửa sổ khuyến mãi của \texttt{promotions.csv} (theo tháng-ngày, lặp lại hàng năm).
-
-\subsubsection{Xử lý Missing Values}
-
-\begin{enumerate}
-  \item Lag features: cascade fill (1y $\to$ 2y $\to$ 3y $\to$ median của train)
-  \item Các NaN còn lại: thay bằng median tính trên tập train (không dùng test)
-  \item Giá trị $\pm\infty$: thay bằng 0
-\end{enumerate}
-
-\subsection{Cross-Validation: TimeSeriesSplit 10 Folds}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[scale=0.72]
-  \foreach \fold/\end in {1/0.36, 2/0.44, 3/0.52, 4/0.60, 5/0.68, 6/0.76, 7/0.84, 8/0.92, 9/1.00, 10/1.00}{
-    \pgfmathsetmacro{\trainend}{\end - 0.08}
-    \pgfmathsetmacro{\valend}{\end}
-    \fill[blue!30] (0, -\fold*0.55+0.55) rectangle (\trainend*10, -\fold*0.55+0.55+0.4);
-    \fill[red!40]  (\trainend*10, -\fold*0.55+0.55) rectangle (\valend*10, -\fold*0.55+0.55+0.4);
-    \node[font=\tiny, anchor=east] at (-0.1, -\fold*0.55+0.55+0.2) {Fold \fold};
-  }
-  \fill[blue!30] (8,  -6.2) rectangle (8.4, -5.9); \node[font=\tiny, anchor=west] at (8.5, -6.05) {Train};
-  \fill[red!40]  (9.2,-6.2) rectangle (9.6, -5.9); \node[font=\tiny, anchor=west] at (9.7, -6.05) {Val};
-\end{tikzpicture}
-\caption{TimeSeriesSplit expanding window (10 folds). Tập validation luôn nằm sau tập train theo thời gian.}
-\label{fig:tscv}
-\end{figure}
-
-\textbf{OOF predictions} từ mỗi fold được dùng làm meta-features cho Ridge stacking. \textbf{Test predictions} là trung bình của 10 folds, giúp giảm variance.
-
-\subsection{Base Models: Ensemble 5 Mô hình}
-
-\begin{table}[H]
-\centering
-\caption{Cấu hình các base model trong ensemble.}
-\label{tab:models}
-\small
-\begin{tabular}{lclp{5cm}}
-\toprule
-\textbf{Model} & \textbf{Iterations} & \textbf{Key Hyperparameters} & \textbf{Đặc điểm} \\
-\midrule
-LightGBM  & 800  & \texttt{depth=8, leaves=95, lr=0.02}             & Nhanh, xử lý native missing \\
-XGBoost   & 800  & \texttt{depth=7, gamma=0.1, lr=0.02}             & L1+L2+gamma regularization \\
-HGB       & 800  & \texttt{depth=8, L2=1.5, lr=0.02}               & Sklearn native, ổn định \\
-\textbf{CatBoost}  & \textbf{1200} & \texttt{depth=8, L2=5.0, lr=0.02}  & Ordered boosting, \textbf{92\% stacking weight} \\
-Ridge     & ---  & \texttt{alpha=10 + StandardScaler}               & Linear, bắt xu hướng dài hạn \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\textbf{Target transform:} $\tilde{y} = \log(1 + r)$ để giảm right-skewness của phân phối Revenue. Dự báo được chuyển ngược bằng $\hat{r} = \max(e^{\tilde{y}} - 1,\, 0)$.
-
-\textbf{CatBoost 1200 iterations:} Phân tích stacking weights cho thấy CatBoost chiếm $\sim$92\% weight. Tăng từ 800 lên 1200 iterations giảm MAE từ 700k xuống 697{,}864.
-
-\subsection{Stacking: Ridge Meta-Learner}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[
-  node distance=0.4cm and 0.3cm,
-  base/.style={rectangle, rounded corners, draw=blue!60, fill=blue!10, text width=1.4cm, align=center, minimum height=0.65cm, font=\scriptsize},
-  meta/.style={rectangle, rounded corners, draw=red!60, fill=red!10, text width=3.5cm, align=center, minimum height=0.65cm, font=\small},
-  out/.style={rectangle, rounded corners, draw=green!60!black, fill=green!10, text width=3cm, align=center, minimum height=0.65cm, font=\small},
-  arr/.style={->, thick}
-]
-  \node[base] (lgb)  {LGB\\OOF};
-  \node[base, right=of lgb]  (xgb)  {XGB\\OOF};
-  \node[base, right=of xgb]  (hgb)  {HGB\\OOF};
-  \node[base, right=of hgb]  (cat)  {Cat\\OOF};
-  \node[base, right=of cat]  (rdg)  {Ridge\\OOF};
-  \node[meta, below=0.7cm of hgb] (stack) {Ridge Meta-Learner\\(positive=True, $\alpha$=1.0)};
-  \node[out,  below=0.6cm of stack] (out)   {Final Prediction};
-  \foreach \m in {lgb,xgb,hgb,cat,rdg}
-    \draw[arr] (\m.south) -- (stack.north);
-  \draw[arr] (stack) -- (out);
-\end{tikzpicture}
-\caption{Kiến trúc 2 lớp của hệ thống stacking.}
-\label{fig:stacking}
-\end{figure}
-
-\begin{table}[H]
-\centering
-\caption{Phân tích stacking weights của Ridge meta-learner (Revenue).}
-\label{tab:weights}
-\small
-\begin{tabular}{lrl}
-\toprule
-\textbf{Model} & \textbf{Weight} & \textbf{Nhận xét} \\
-\midrule
-CatBoost & $\sim$0.92 & Dominant -- phù hợp nhất với time-series nhỏ \\
-HGB      & $\sim$0.11 & Bổ trợ nhỏ \\
-Ridge    & $\sim$0.02 & Điều chỉnh xu hướng dài hạn \\
-LightGBM & $\sim$0.00 & Gián tiếp thông qua diversity \\
-XGBoost  & $\sim$0.00 & Gián tiếp thông qua diversity \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\textit{Lưu ý:} Mặc dù LGB/XGB có weight $\approx 0$, loại bỏ chúng khiến MAE tăng thêm 5k. Điều này cho thấy \textbf{diversity của ensemble} vẫn có giá trị gián tiếp trong quá trình stacking.
-
-\subsection{Dự báo COGS}
-
-COGS được dự báo theo cùng pipeline với Revenue (5 base models $+$ Ridge stacking). Dự báo cuối cùng là blend tuyến tính:
-\begin{equation}
-  \hat{c}_{\text{final}} = 0.7 \cdot \hat{c}_{\text{model}} + 0.3 \cdot (\hat{r} \cdot \rho)
-\end{equation}
-trong đó $\rho = \sum c_i / \sum r_i$ là tỉ lệ COGS/Revenue lịch sử từ tập train.
-
-% ─────────────────────────────────────────────────────────
-\section{Kết quả Thực nghiệm}
-% ─────────────────────────────────────────────────────────
-
-\subsection{Tuân thủ Ràng buộc}
-
-\begin{table}[H]
-\centering
-\caption{Kiểm chứng tuân thủ ràng buộc.}
-\label{tab:constraints}
-\small
-\begin{tabular}{p{5cm}cp{6cm}}
-\toprule
-\textbf{Ràng buộc} & \textbf{Trạng thái} & \textbf{Minh chứng} \\
-\midrule
-Không dùng Revenue/COGS test làm feature & \checkmark & Lag dates $<$ 01/01/2023 \\
-Không dùng dữ liệu ngoài   & \checkmark & Chỉ dùng 8 file CSV trong \texttt{data/} \\
-Mã nguồn tái lập được     & \checkmark & \texttt{SEED=42}, deterministic, kết quả giống khi chạy lại \\
-TimeSeriesSplit không rò rỉ & \checkmark & Val luôn \textit{sau} train theo thời gian \\
-Auxiliary data không rò rỉ & \checkmark & Chỉ dùng seasonal averages (chu kỳ tháng/DOW) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Kết quả trên Kaggle Leaderboard}
-
-\begin{table}[H]
-\centering
-\caption{Kết quả cuối cùng trên Kaggle Public Leaderboard.}
-\label{tab:results}
-\begin{tabular}{lc}
-\toprule
-\textbf{Metric} & \textbf{Giá trị} \\
-\midrule
-\textbf{MAE (Public Score)} & \textbf{697,864} \\
-\midrule
-Biến đổi target & $\log(1+r)$ \\
-Số features & 80 \\
-Số base models & 5 \\
-Số CV folds & 10 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Phân tích Ablation}
-
-Bảng~\ref{tab:ablation} tóm tắt tác động của các thành phần chính đến MAE trên OOF.
-
-\begin{table}[H]
-\centering
-\caption{Ablation study -- ảnh hưởng của từng thành phần pipeline.}
-\label{tab:ablation}
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Thành phần} & \textbf{Thay đổi MAE} & \textbf{Nhận xét} \\
-\midrule
-CatBoost 800$\to$1200 iterations & $-$2.1k & Tương ứng 92\% stacking weight \\
-Calendar features (holiday, quarter...) & $-$7k & Pattern ngày lễ/quý quan trọng \\
-Merge analysis features (pageviews...) & cải thiện & Tín hiệu web traffic bổ sung \\
-Loại bỏ LGB/XGB khỏi ensemble & $+$5k & Diversity có giá trị gián tiếp \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Giải thích Mô hình (Model Interpretability)}
-
-\paragraph{CatBoost Feature Importance.}
-CatBoost được chọn để phân tích feature importance (PredictionValuesChange) vì chiếm $\sim$92\% stacking weight. Top features theo thứ tự quan trọng:
-\begin{enumerate}
-  \item \texttt{rev\_1y}, \texttt{rev\_2y}, \texttt{cogs\_1y} -- Revenue/COGS cùng kỳ năm trước
-  \item \texttt{time\_idx} -- xu hướng tăng trưởng dài hạn
-  \item \texttt{orders\_month\_avg}, \texttt{pay\_month\_avg} -- chỉ số kinh doanh theo mùa
-  \item \texttt{pv\_month} -- page views (tương quan 0.959 với Revenue)
-  \item \texttt{rev\_month\_avg}, \texttt{rev\_month\_dow} -- seasonal Revenue baseline
-\end{enumerate}
-
-\paragraph{SHAP Values.}
-SHAP (SHapley Additive exPlanations) với TreeExplainer được áp dụng trên 500 mẫu ngẫu nhiên từ tập train. Kết quả xác nhận: (i) Historical Revenue là yếu tố quyết định nhất; (ii) \texttt{time\_idx} có SHAP dương với xu hướng tăng dần theo năm; (iii) \texttt{is\_holiday} và \texttt{is\_near\_holiday} có tác động âm rõ ràng trong giai đoạn nghỉ lễ.
-
-% ─────────────────────────────────────────────────────────
-\section{Thảo luận và Kết luận}
-% ─────────────────────────────────────────────────────────
-
-\subsection{Điểm mạnh của Pipeline}
-
-\begin{enumerate}
-  \item \textbf{Direct forecasting:} Tránh tích lũy sai số trong horizon 548 ngày.
-  \item \textbf{80 features từ 7 nguồn:} Khai thác đa dạng tín hiệu time, business cycle, holiday, web traffic.
-  \item \textbf{Kiểm soát leakage nghiêm ngặt:} TimeSeriesSplit + lag từ train only + seasonal averages.
-  \item \textbf{Ensemble đa dạng + Ridge stacking:} Tự tìm trọng số tối ưu, không cần grid search.
-  \item \textbf{Interpretability:} Feature importance + SHAP giải thích từng dự báo.
-\end{enumerate}
-
-\subsection{Key Insights}
-
-\begin{itemize}
-  \item \textbf{Historical Revenue cùng kỳ} là đặc trưng quan trọng nhất -- mẫu mùa vụ lặp lại hàng năm rất mạnh.
-  \item \textbf{CatBoost với ordered boosting} phù hợp nhất với bộ dữ liệu chuỗi thời gian nhỏ (3,833 mẫu).
-  \item \textbf{Web traffic (page views)} có tương quan 0.959 với Revenue -- tín hiệu dự báo sớm hữu ích.
-  \item \textbf{Payments} là bộ dữ liệu phụ trợ có tương quan cao nhất (0.992) nhưng seasonal pattern của nó bị một phần bắt chéo bởi Revenue seasonal features.
-\end{itemize}
-
-\subsection{Hạn chế}
-
-Hệ thống có một số hạn chế: (i) Seasonal patterns giả định chu kỳ ổn định qua năm -- khó xử lý các sự kiện bất thường (đại dịch, khủng hoảng); (ii) Không có auxiliary data thực tế cho test period -- seasonal averages chỉ là xấp xỉ; (iii) Mô hình không khai thác cấu trúc không gian (region, category) tiềm ẩn trong dữ liệu.
-
-\appendix
-
-\section{Chi tiết Hyperparameters}
-\label{app:hyperparams}
-
-\begin{lstlisting}[language=Python, caption={Cấu hình các base models.}]
-LGBMRegressor(n_estimators=800, learning_rate=0.02, max_depth=8,
-              num_leaves=95, min_child_samples=15, subsample=0.75,
-              colsample_bytree=0.75, reg_alpha=0.05, reg_lambda=1.5)
-
-XGBRegressor(n_estimators=800, learning_rate=0.02, max_depth=7,
-             min_child_weight=5, subsample=0.75, colsample_bytree=0.75,
-             reg_alpha=0.05, reg_lambda=1.5, gamma=0.1)
-
-HistGradientBoostingRegressor(max_iter=800, learning_rate=0.02,
-              max_depth=8, max_leaf_nodes=95,
-              min_samples_leaf=15, l2_regularization=1.5)
-
-CatBoostRegressor(iterations=1200, learning_rate=0.02, depth=8,
-                  l2_leaf_reg=5.0)
-
-Pipeline([("scaler", StandardScaler()), ("model", Ridge(alpha=10.0))])
-\end{lstlisting}
-
-\section{Danh sách 80 Đặc trưng}
-\label{app:features}
-
-\begin{table}[H]
-\centering
-\caption{Danh sách đầy đủ 80 đặc trưng theo nhóm.}
-\label{tab:all_features}
-\scriptsize
-\begin{tabular}{lp{11cm}}
-\toprule
-\textbf{Nhóm} & \textbf{Đặc trưng} \\
-\midrule
-Time (12)              & year, month, day, dayofweek, dayofyear, weekofyear, quarter, is\_weekend, is\_month\_start, is\_month\_end, time\_idx, day\_of\_month\_pct \\
-Calendar (17)          & is\_saturday, is\_sunday, is\_monday, is\_friday, week\_of\_month, is\_first\_week, is\_last\_week, is\_mid\_month, days\_to\_month\_end, is\_q1, is\_q2, is\_q3, is\_q4, is\_quarter\_start, is\_quarter\_end, month\_in\_quarter, is\_year\_start, is\_year\_end \\
-Holiday (2)            & is\_holiday, is\_near\_holiday \\
-Cyclical (10)          & month\_sin/cos, dow\_sin/cos, doy\_sin1/cos1, doy\_sin2/cos2, doy\_sin3/cos3 \\
-Historical (10)        & rev\_1y/2y/3y, cogs\_1y/2y/3y, rev\_yoy\_growth, margin\_1y, rev\_avg\_hist, rev\_1y\_vs\_month \\
-Auxiliary (22)         & orders\_month/dow/quarter/month-dow avg, pay\_month/dow avg, ship\_month/dow avg, ret\_month avg, refund\_month avg, web\_month/dow/visitors avg, rev\_month/dow/std/med avg, cogs\_month avg, margin\_month avg, rev\_month\_dow \\
-Merge Analysis (9)     & pv\_month, pv\_dow, bounce\_month, bounce\_dow, duration\_month, inst\_month, avg\_refund\_month, items\_per\_order\_month, pay\_per\_order\_month \\
-Promotions (1)         & is\_promo \\
-\midrule
-\textbf{Tổng cộng} & \textbf{83} (feature\_cols sử dụng 80 do một số merge features được gộp) \\
-\bottomrule
-\end{tabular}
-\end{table}
+\noindent\textbf{Feature importance (CatBoost):} \texttt{rev\_1y/rev\_2y} (seasonal cùng kỳ năm trước) quan trọng nhất, tiếp theo \texttt{time\_idx} (trend), \texttt{pay\_month\_avg}, \texttt{pv\_month}. SHAP xác nhận \texttt{is\_holiday}/\texttt{is\_near\_holiday} tác động âm rõ trong giai đoạn Tết.
 
 \end{document}
